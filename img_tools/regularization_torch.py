@@ -38,12 +38,3 @@ def total_variation_smoothing(H : torch.Tensor, EPS=1e-8):
 
     return stv_total
 
-
-
-class Regularizer:
-
-
-
-    @staticmethod
-    def stv(H):
-
