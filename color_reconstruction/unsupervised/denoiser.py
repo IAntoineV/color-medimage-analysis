@@ -5,7 +5,7 @@ import numpy as np
 
 
 class Diffusion:
-    def __init__(self, denoising_model, device=None,timesteps=1000, beta_start=1e-4, beta_end=0.02):
+    def __init__(self, denoising_model, device=None,timesteps=1000, beta_start=1e-4, beta_end=2e-2):
         self.timesteps = timesteps
         if device is None:
             device = torch.device('cpu')
@@ -25,8 +25,10 @@ class Diffusion:
         """
         alpha_bar_t = self.alpha_bars[t].view(-1, 1, 1, 1) # Shape it for broadcasting
         noise = torch.randn_like(x0).to(self.device)
-        x_t = torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * noise
-        return x_t, noise
+        x0 = x0.to(self.device)
+        xt = torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * noise
+        xt = torch.clip(xt, 0., 1.)
+        return xt, noise
 
     def backward_diffusion(self, xt, t, sampling=False):
         """
@@ -35,6 +37,8 @@ class Diffusion:
         :param t (torch.Tensor): number of diffusion timesteps
         :return:
         """
+        if len(xt.shape)==3:
+            xt=xt.unsqueeze(0)
         t = t-1
         if isinstance(t, int):
             t= torch.tensor([t], dtype=torch.int, device=self.device)
@@ -50,7 +54,7 @@ class Diffusion:
             x_denoised = x_denoised +  (t>0)* sigma_t * z
         return x_denoised, epsilon_theta
 
-    def sampling(self, shape, T=None):
+    def sampling(self, shape=None, xT=None,T=None):
         """
         Generate a new image
 
@@ -58,10 +62,13 @@ class Diffusion:
         :param shape:
         :return:
         """
+        assert shape is not None or xT is not None, "No specific prior or noise shape given !"
+
         if T is None:
             T = self.timesteps
-        xT = torch.randn(shape).to(self.device)
-        xt = xT
+        if xT is None:
+            xT = torch.randn(shape)
+        xt = xT.to(self.device)
         for denoising_step in range(T):
             timestep = T - denoising_step -1
             xt,_ = self.backward_diffusion(xt, timestep, sampling=True)
@@ -74,7 +81,7 @@ class Diffusion:
         mse_loss = nn.MSELoss()
         device = self.device
         for epoch in range(num_epochs):
-            for images, _ in dataloader:
+            for images in dataloader:
                 images = images.to(device)
 
                 # Sample random timestep for each batch element
@@ -94,6 +101,7 @@ class Diffusion:
                 optimizer.step()
             if verbose:
                 print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4g}")
+
 
 
 class UNet(nn.Module):
@@ -131,6 +139,8 @@ class UNet(nn.Module):
 
 
 
+
+
 def main():
     from torch.utils.data import DataLoader
     from torchvision import datasets, transforms
@@ -155,5 +165,95 @@ def main():
     plt.show()
 
 
+
+def main_2():
+    import os
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    from torchvision import transforms
+    from torch.utils.data import Dataset, DataLoader
+
+    # Chargement du dataset avec extraction de patchs
+    class HistoLiverPatchDataset(Dataset):
+        def __init__(self, image_dir, patch_size=64, transform=None):
+            self.image_dir = image_dir
+            self.transform = transform
+            self.patch_size = patch_size
+            self.images = [os.path.join(image_dir, img) for img in os.listdir(image_dir) if
+                           img.endswith('.jpg') or img.endswith('.png')]
+
+        def __len__(self):
+            return len(self.images) * (64 // self.patch_size) ** 2  # Nombre de patchs total
+
+        def __getitem__(self, idx):
+            img_idx = idx // ((64 // self.patch_size) ** 2)  # Sélection de l'image
+            patch_idx = idx % ((64 // self.patch_size) ** 2)  # Sélection du patch
+
+            img_path = self.images[img_idx]
+            image = Image.open(img_path).convert("RGB")
+            if self.transform:
+                image = self.transform(image)
+
+            # Extraire le patch
+            row = (patch_idx // (64 // self.patch_size)) * self.patch_size
+            col = (patch_idx % (64 // self.patch_size)) * self.patch_size
+            patch = image[:, row:row + self.patch_size, col:col + self.patch_size]
+
+            return patch
+
+    # Définir les transformations pour les images
+    transform = transforms.Compose([
+        transforms.Resize((64, 64)),  # Redimensionner les images en 64x64
+        transforms.ToTensor()
+    ])
+
+    # Charger le dataset de patchs
+    image_dir = '../../dataset/data/liver_HES'  # Assurez-vous que ce dossier contient vos images
+    patch_size = 64
+    dataset = HistoLiverPatchDataset(image_dir=image_dir, patch_size=patch_size, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)  # Batch de 16 patchs
+
+    timesteps = 20
+    device = torch.device("cuda")
+    model = UNet().to(device)
+    diffusion = Diffusion(model, timesteps=timesteps, beta_end=1e-3,device=device)
+    diffusion.train(dataloader, lr=1e-3, num_epochs=500)
+
+    # Chargement d'une image complète et affichage des résultats
+    full_image = transform(Image.open(dataset.images[0]).convert("RGB"))  # Charger une image
+
+    noisy_img, _ = diffusion.forward_diffusion(full_image, 10)
+    noisy_img = noisy_img.squeeze(0)
+    reconstructed_full_image = diffusion.sampling(shape=None,xT=noisy_img, T=10).squeeze(0).clip(0.,1.)
+
+    # Afficher les résultats
+    def show_images(original, noisy, reconstructed):
+        original = np.transpose(original.cpu().numpy(), (1, 2, 0))
+        noisy = np.transpose(noisy.cpu().numpy(), (1, 2, 0))
+        reconstructed = np.transpose(reconstructed.detach().cpu().numpy(), (1, 2, 0))
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        axes[0].imshow(original)
+        axes[0].set_title("Image Originale")
+        axes[0].axis("off")
+
+        axes[1].imshow(noisy)
+        axes[1].set_title("Image Bruitée")
+        axes[1].axis("off")
+
+        axes[2].imshow(reconstructed)
+        axes[2].set_title("Image Reconstituée")
+        axes[2].axis("off")
+
+        plt.show()
+
+    show_images(full_image, noisy_img, reconstructed_full_image)
+
+
+
 if __name__ == '__main__':
-    main()
+    main_2()
