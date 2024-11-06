@@ -1,1 +1,1 @@
-from .PGD import  PGD
+from .PGD import  PGD, GD

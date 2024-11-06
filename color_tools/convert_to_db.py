@@ -4,7 +4,7 @@ import numpy as np
 
 
 
-def convert_to_db(img, I0 = None, EPS = 1e-9):
+def convert_to_db(img, I0 = None, EPS = 1e-3):
 
     if I0 is None:
         return np.clip(-np.log(img + EPS), 0, None)
