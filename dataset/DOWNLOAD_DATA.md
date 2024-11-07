@@ -8,3 +8,6 @@
 *  unzip it in the data directory 
 * take the tuberculosis-phonecamera directory out of the archive directory
 * delete the archive directory
+
+## 2. Liver dataset
+

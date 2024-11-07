@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
+from matplotlib import pyplot as plt
 
 class Diffusion:
     def __init__(self, denoising_model, device=None,timesteps=1000, beta_start=1e-4, beta_end=2e-2):
@@ -27,7 +27,7 @@ class Diffusion:
         noise = torch.randn_like(x0).to(self.device)
         x0 = x0.to(self.device)
         xt = torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * noise
-        xt = torch.clip(xt, 0., 1.)
+        #xt = torch.clip(xt, 0., 1.)
         return xt, noise
 
     def backward_diffusion(self, xt, t, sampling=False):
@@ -43,7 +43,7 @@ class Diffusion:
         if isinstance(t, int):
             t= torch.tensor([t], dtype=torch.int, device=self.device)
         t = t.view(-1,1,1,1)
-        epsilon_theta = self.model(xt)
+        epsilon_theta = self.model(xt, t)
         rescaling_coef_eps_theta = (self.betas[t]/torch.sqrt(1-self.alpha_bars[t])).view(-1, 1, 1, 1)
         last_rescale = (1/torch.sqrt(self.alphas[t])).view(-1,1,1,1)
         # Eq (11)
@@ -54,6 +54,7 @@ class Diffusion:
             x_denoised = x_denoised +  (t>0)* sigma_t * z
         return x_denoised, epsilon_theta
 
+    @torch.no_grad()
     def sampling(self, shape=None, xT=None,T=None):
         """
         Generate a new image
@@ -62,6 +63,7 @@ class Diffusion:
         :param shape:
         :return:
         """
+        self.model.eval()
         assert shape is not None or xT is not None, "No specific prior or noise shape given !"
 
         if T is None:
@@ -72,6 +74,7 @@ class Diffusion:
         for denoising_step in range(T):
             timestep = T - denoising_step -1
             xt,_ = self.backward_diffusion(xt, timestep, sampling=True)
+            #xt = xt.clip(0,1)
         x0 = xt
         return x0
 
@@ -81,7 +84,9 @@ class Diffusion:
         mse_loss = nn.MSELoss()
         device = self.device
         for epoch in range(num_epochs):
-            for images in dataloader:
+            i=0
+            for images in dataloader():
+                i+=1
                 images = images.to(device)
 
                 # Sample random timestep for each batch element
@@ -100,13 +105,13 @@ class Diffusion:
                 loss.backward()
                 optimizer.step()
             if verbose:
-                print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4g}")
+                print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4g}, nb_step: {i}")
 
 
 
-class UNet(nn.Module):
+class SmallUNet(nn.Module):
     def __init__(self, input_channels=3, base_channels=64):
-        super(UNet, self).__init__()
+        super(SmallUNet, self).__init__()
 
         # Encoder layers
         self.encoder1 = nn.Sequential(nn.Conv2d(input_channels, base_channels, 3, padding=1), nn.ReLU())
@@ -115,14 +120,14 @@ class UNet(nn.Module):
         # Bottleneck
         self.bottleneck = nn.Sequential(nn.Conv2d(base_channels * 2, base_channels * 4, 3, padding=1), nn.ReLU())
 
-        # Decoder layers
+         # Decoder layers
         self.decoder1 = nn.Sequential(nn.Conv2d(base_channels * 4, base_channels * 2, 3, padding=1), nn.ReLU())
         self.decoder2 = nn.Sequential(nn.Conv2d(base_channels * 2, base_channels, 3, padding=1), nn.ReLU())
 
         # Output layer
         self.output = nn.Conv2d(base_channels, input_channels, 1)
 
-    def forward(self, x):
+    def forward(self, x, t):
         # Encode
         x1 = self.encoder1(x)
         x2 = self.encoder2(F.max_pool2d(x1, 2))
@@ -139,32 +144,75 @@ class UNet(nn.Module):
 
 
 
+def show_images(original, noisy, reconstructed):
+    original = np.transpose(original.cpu().numpy(), (1, 2, 0))
+    noisy = np.transpose(noisy.cpu().numpy(), (1, 2, 0))
+    reconstructed = np.transpose(reconstructed.detach().cpu().numpy(), (1, 2, 0))
 
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(original)
+    axes[0].set_title("Image Originale")
+    axes[0].axis("off")
+
+    axes[1].imshow(noisy)
+    axes[1].set_title("Image Bruitée")
+    axes[1].axis("off")
+
+    axes[2].imshow(reconstructed)
+    axes[2].set_title("Image Reconstituée")
+    axes[2].axis("off")
+
+    plt.show()
 
 def main():
     from torch.utils.data import DataLoader
     from torchvision import datasets, transforms
     import matplotlib.pyplot as plt
+    import tqdm
+    from unet import Unet
     # Set up data loader
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    train_dataset = datasets.CIFAR10(root="data", train=True, transform=transform, download=True)
+    transform = transforms.Compose([transforms.ToTensor(),
+    transforms.Lambda(lambda x: 2 * x - 1),
+    transforms.Resize((64,64))])
+    #train_dataset = datasets.CIFAR10(root="data", train=True, transform=transform, download=True)
+    train_dataset = datasets.CelebA(root="data", transform=transform, download=True)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-
+    def gene():
+        for elt in tqdm.tqdm(train_loader):
+            yield elt[0]
     # Initialize diffusion process and model
     timesteps = 1000
+    t_reconst=200
+    num_epochs = 10
     device = torch.device("cuda")
-    model = UNet().to(device)
+    model = Unet(channels=64).to(device)
+    nb_params = sum([elt.numel() for elt in model.parameters()])
+    print(f"nb params : {nb_params}")
     diffusion = Diffusion(model, timesteps=timesteps, device=device)
 
-
+    full_image = next(gene())[0].unsqueeze(0)  # Charger une image
     # Train model
-    diffusion.train(train_loader, num_epochs=50)
-    shape = (1,3,32,32)
+    diffusion.train(gene, num_epochs=num_epochs)
+    shape = full_image.shape
     img_gen = diffusion.sampling(shape)
     plt.imshow(np.clip(img_gen[0].permute(2,1,0).detach().cpu().numpy(), 0, 1))
     plt.show()
 
 
+
+    noisy_img = full_image.clone()
+    # noisy_img[0, :, :] = 0
+    noisy_img, _ = diffusion.forward_diffusion(noisy_img, t_reconst)
+    noisy_img = noisy_img.squeeze(0)
+    reconstructed_full_image = diffusion.sampling(shape=None, xT=noisy_img, T=t_reconst).squeeze(0)
+    # reconstructed_full_image = diffusion.sampling(shape = noisy_img.shape, T=t_reconst).squeeze(0).clip(0., 1.)
+    # reconstructed_full_image = diffusion.sampling(xT=reconstructed_full_image, T=20).squeeze(0).clip(0., 1.)
+    # Afficher les résultats
+
+
+    show_images((1 + full_image[0]) / 2, (1 + noisy_img) / 2, (1 + reconstructed_full_image) / 2)
+
+    torch.save(model.state_dict(), "model_latest.pt")
 
 def main_2():
     import os
@@ -176,84 +224,81 @@ def main_2():
     import matplotlib.pyplot as plt
     from torchvision import transforms
     from torch.utils.data import Dataset, DataLoader
-
+    from unet import Unet
+    np.random.seed(42)
+    torch.manual_seed(42)
     # Chargement du dataset avec extraction de patchs
     class HistoLiverPatchDataset(Dataset):
-        def __init__(self, image_dir, patch_size=64, transform=None):
+
+        def __init__(self, image_dir, nb_steps=1000, patch_size=64, transform=None):
             self.image_dir = image_dir
             self.transform = transform
             self.patch_size = patch_size
             self.images = [os.path.join(image_dir, img) for img in os.listdir(image_dir) if
                            img.endswith('.jpg') or img.endswith('.png')]
 
+            self.np_images = [Image.open(img_path).convert("RGB") for img_path in self.images]
+            self.nb_img = len(self.images)
+            self.nb_steps = nb_steps
         def __len__(self):
-            return len(self.images) * (64 // self.patch_size) ** 2  # Nombre de patchs total
+            return self.nb_steps
 
         def __getitem__(self, idx):
-            img_idx = idx // ((64 // self.patch_size) ** 2)  # Sélection de l'image
-            patch_idx = idx % ((64 // self.patch_size) ** 2)  # Sélection du patch
+            # Randomly select an image from the list
+            image_idx = np.random.choice(range(self.nb_img))
+            image = self.np_images[image_idx]
+            # Convert to tensor temporarily to get width and height
+            image_tensor = 2*transforms.ToTensor()(image)-1
+            _, img_height, img_width = image_tensor.shape
 
-            img_path = self.images[img_idx]
-            image = Image.open(img_path).convert("RGB")
-            if self.transform:
-                image = self.transform(image)
+            # Randomly select the top-left corner of the patch
+            max_row = img_height - self.patch_size
+            max_col = img_width - self.patch_size
+            row = np.random.randint(0, max_row)
+            col = np.random.randint(0, max_col)
 
-            # Extraire le patch
-            row = (patch_idx // (64 // self.patch_size)) * self.patch_size
-            col = (patch_idx % (64 // self.patch_size)) * self.patch_size
-            patch = image[:, row:row + self.patch_size, col:col + self.patch_size]
+            # Crop the patch from the image
+            patch = image_tensor[:, row:row + self.patch_size, col:col + self.patch_size]
 
             return patch
 
     # Définir les transformations pour les images
     transform = transforms.Compose([
-        transforms.Resize((64, 64)),  # Redimensionner les images en 64x64
         transforms.ToTensor()
     ])
 
     # Charger le dataset de patchs
-    image_dir = '../../dataset/data/liver_HES'  # Assurez-vous que ce dossier contient vos images
+    image_dir = '../../dataset/data/liver_HE'  # Assurez-vous que ce dossier contient vos images
     patch_size = 64
-    dataset = HistoLiverPatchDataset(image_dir=image_dir, patch_size=patch_size, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)  # Batch de 16 patchs
+    batch_size = 64
+    nb_patch_per_epoch = 6400
+    dataset = HistoLiverPatchDataset(nb_steps= nb_patch_per_epoch ,image_dir=image_dir, patch_size=patch_size, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    timesteps = 20
+    timesteps = 1000
+    t_reconst = 100
     device = torch.device("cuda")
-    model = UNet().to(device)
-    diffusion = Diffusion(model, timesteps=timesteps, beta_end=1e-3,device=device)
-    diffusion.train(dataloader, lr=1e-3, num_epochs=500)
+    model = Unet().to(device)
+    nb_params = sum([elt.numel() for elt in model.parameters()])
+    print(f"nb params : {nb_params}")
+    diffusion = Diffusion(model, timesteps=timesteps, beta_end=2e-2,device=device)
+    diffusion.train(dataloader, lr=1e-3, num_epochs=50)
 
     # Chargement d'une image complète et affichage des résultats
-    full_image = transform(Image.open(dataset.images[0]).convert("RGB"))  # Charger une image
-
-    noisy_img, _ = diffusion.forward_diffusion(full_image, 10)
+    full_image = dataset[0][:,:patch_size,:patch_size]  # Charger une image
+    noisy_img = full_image.clone()
+    #noisy_img[0, :, :] = 0
+    noisy_img, _ = diffusion.forward_diffusion(noisy_img, t_reconst)
     noisy_img = noisy_img.squeeze(0)
-    reconstructed_full_image = diffusion.sampling(shape=None,xT=noisy_img, T=10).squeeze(0).clip(0.,1.)
-
+    reconstructed_full_image = diffusion.sampling(shape=None,xT=noisy_img, T=t_reconst).squeeze(0)
+    #reconstructed_full_image = diffusion.sampling(shape = noisy_img.shape, T=t_reconst).squeeze(0).clip(0., 1.)
+    #reconstructed_full_image = diffusion.sampling(xT=reconstructed_full_image, T=20).squeeze(0).clip(0., 1.)
     # Afficher les résultats
-    def show_images(original, noisy, reconstructed):
-        original = np.transpose(original.cpu().numpy(), (1, 2, 0))
-        noisy = np.transpose(noisy.cpu().numpy(), (1, 2, 0))
-        reconstructed = np.transpose(reconstructed.detach().cpu().numpy(), (1, 2, 0))
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        axes[0].imshow(original)
-        axes[0].set_title("Image Originale")
-        axes[0].axis("off")
 
-        axes[1].imshow(noisy)
-        axes[1].set_title("Image Bruitée")
-        axes[1].axis("off")
-
-        axes[2].imshow(reconstructed)
-        axes[2].set_title("Image Reconstituée")
-        axes[2].axis("off")
-
-        plt.show()
-
-    show_images(full_image, noisy_img, reconstructed_full_image)
+    show_images((1+full_image)/2, (1+noisy_img)/2, (1+reconstructed_full_image)/2)
 
 
 
 if __name__ == '__main__':
-    main_2()
+    main()
