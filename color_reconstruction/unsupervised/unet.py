@@ -2,6 +2,8 @@ import math
 
 import numpy as np
 import torch
+from torch import nn
+from torch.nn import functional as F
 
 
 def create_positional_encoding(max_t=1000, t_dim=128):
@@ -180,6 +182,45 @@ class Unet(torch.nn.Module):
         x_t = self.final_conv(x_t)
 
         return x_t
+
+
+
+
+
+class SmallUNet(nn.Module):
+    def __init__(self, input_channels=3, base_channels=64):
+        super(SmallUNet, self).__init__()
+
+        # Encoder layers
+        self.encoder1 = nn.Sequential(nn.Conv2d(input_channels, base_channels, 3, padding=1), nn.ReLU())
+        self.encoder2 = nn.Sequential(nn.Conv2d(base_channels, base_channels * 2, 3, padding=1), nn.ReLU())
+
+        # Bottleneck
+        self.bottleneck = nn.Sequential(nn.Conv2d(base_channels * 2, base_channels * 4, 3, padding=1), nn.ReLU())
+
+         # Decoder layers
+        self.decoder1 = nn.Sequential(nn.Conv2d(base_channels * 4, base_channels * 2, 3, padding=1), nn.ReLU())
+        self.decoder2 = nn.Sequential(nn.Conv2d(base_channels * 2, base_channels, 3, padding=1), nn.ReLU())
+
+        # Output layer
+        self.output = nn.Conv2d(base_channels, input_channels, 1)
+
+    def forward(self, x, t):
+        # Encode
+        x1 = self.encoder1(x)
+        x2 = self.encoder2(F.max_pool2d(x1, 2))
+
+        # Bottleneck
+        x_bottleneck = self.bottleneck(F.max_pool2d(x2, 2))
+
+        # Decode
+        x = F.interpolate(self.decoder1(x_bottleneck), scale_factor=2)
+        x = F.interpolate(self.decoder2(x + x2), scale_factor=2)
+
+        # Output layer
+        return self.output(x + x1)
+
+
 
 
 if __name__ == "__main__":
