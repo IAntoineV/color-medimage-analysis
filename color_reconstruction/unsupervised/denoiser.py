@@ -36,7 +36,6 @@ class Diffusion:
         """
         if len(xt.shape)==3:
             xt=xt.unsqueeze(0)
-        t = t-1
         if isinstance(t, int):
             t= torch.tensor([t], dtype=torch.int, device=self.device)
         t = t.view(-1,1,1,1)
@@ -45,10 +44,12 @@ class Diffusion:
         last_rescale = (1/torch.sqrt(self.alphas[t])).view(-1,1,1,1)
         # Eq (11)
         x_denoised = last_rescale*(xt - epsilon_theta * rescaling_coef_eps_theta)
+        if sampling and t==0:
+            return x_denoised, epsilon_theta
         if sampling:
             z = torch.randn_like(x_denoised).to(self.device)
             sigma_t = torch.sqrt(self.betas[t]).view(-1, 1, 1, 1)
-            x_denoised = x_denoised +  (t>0)* sigma_t * z
+            x_denoised = x_denoised +  sigma_t * z
         return x_denoised, epsilon_theta
 
     @torch.no_grad()
@@ -82,7 +83,7 @@ class Diffusion:
         device = self.device
         for epoch in range(num_epochs):
             i=0
-            for images in dataloader():
+            for images in dataloader:
                 i+=1
                 images = images.to(device)
 
